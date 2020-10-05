@@ -1,0 +1,178 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('backend:server');
+var http = require('http');
+const socket = require('socket.io');
+var Message = require('../model/Message');
+var Topic = require('../model/Topic');
+var User = require('../model/User');
+
+var mongoose = require('mongoose');
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+// ==========================================
+const io = socket(server);
+io.on('connection', socket => {
+  let room;
+  socket.on('createroom', (data) => { room = data; socket.join(room) });
+
+  socket.on('sendMessage', (data) => {
+    console.log(data)
+    const message = new Message(data);
+    socket.join(data.topicId)
+    message.save()
+      .then((msg) => {
+        if (msg) {
+          // Message.updateMany({topicId:msg.topicId,toId:msg.toId,status:'read'},{status:'replied'}).then((msg) => {
+          //   console.log(msg)
+          //  }).catch(err => { console.log(err); })          
+          Topic.findByIdAndUpdate({ _id: msg.topicId }, { lastMsgId: mongoose.Types.ObjectId(msg._id), status: true })
+            .then(topic => {
+              User.find({ _id: msg.fromId }, { _id: 1, image: 1, onlinestatus: 1, username: 1 })
+                .then(user => {
+                  let data = {
+                    name: topic.name,
+                    _id: topic._id,
+                    lastMsgId: { content: msg.content,createdAt: msg.createdAt, status: msg.status, type: msg.type, _id: msg.id,toId: msg.toId,fromId: user[0]}
+                  }                 
+                  io.sockets.emit('latestMessage', data);
+                })
+            })
+          io.to(msg.topicId).emit('reciveMessageData', msg);
+        }
+      }).catch(err => { console.log(err); })
+  })
+
+  socket.on('delMessage', (data) => {
+  socket.join(data.topicId)
+  let lastMsg =data.lastMsg;
+  let delId =data._id;
+  let topicId =data.topicId;
+  Message.findByIdAndRemove({_id:data._id})
+    .then((msg) => {
+      if (msg) {        
+       Topic.findByIdAndUpdate({ _id:data.topicId },{lastMsgId:lastMsg._id})
+        .then((topic) => {
+          User.find({ _id: lastMsg.fromId }, { _id: 1, image: 1, onlinestatus: 1, username: 1 })
+          .then(user => {
+          let data = {
+            name: topic.name,
+            _id: topic._id,
+            lastMsgId: { content: lastMsg.content,createdAt: lastMsg.createdAt, status: lastMsg.status, type: lastMsg.type, _id: lastMsg.id,toId: lastMsg.toId,fromId: user[0]}
+          }
+          io.sockets.emit('latestMessage',data);
+          io.to(topicId).emit('reciveDelMessageData', delId);
+          })
+          .catch(err => {})
+         }).catch(err => {})
+      } 
+    }).catch(err => {
+      res.json(err)
+    })
+      
+  })
+
+
+  socket.on('typingMessage', (data) => {
+    socket.join(data.topicId)
+    io.to(data.topicId).emit('reciveTypingMessageData', data);
+  })
+
+  socket.on('makeMessageRead', (data) => {
+    socket.join(data.topicId)
+    Message.updateMany({topicId:data.topicId,_id:{$in:data.idList} },{status:'read'}).then((msg) => {  
+    io.to(data.topicId).emit('updateMessageRead', data);
+     }).catch(err => { console.log(err); })  
+  })
+
+  socket.on('makeMessageReplied', (data) => {
+    socket.join(data.topicId)
+    Message.updateMany({topicId:data.topicId,_id:{$in:data.idList} },{status:'read'}).then((msg) => {  
+    io.to(data.topicId).emit('updateMessageReplied', data);
+     }).catch(err => { console.log(err); })  
+  })
+})
+
+// =========================================
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
